@@ -157,6 +157,29 @@ class DiGraphEx(nx.DiGraph):
         """
         return [node for node, degree in self.out_degree if degree == 0]
 
+    def get_single_reachable_leaves(self, root: Identifier) -> list[Identifier]:
+        """Get reachable leaf nodes from specified root.
+
+        Args:
+            root: the start node to consider
+
+        Returns:
+            the leaves reachable from that node.
+        """
+        s_leaves = set(self.leaf_nodes)
+        s_reachable_leaves = self.single_node_successors(root)
+
+        return list(s_leaves.intersection(s_reachable_leaves))
+
+    def get_multiple_reachable_leaves(self, roots: list[Identifier]) -> list[Identifier]:
+        all_reachable: set[Identifier] = set()
+
+        for root in roots:
+            reachable_leaves = set(self.get_single_reachable_leaves(root))
+            all_reachable = all_reachable.union(reachable_leaves)
+
+        return list(all_reachable)
+
     @property
     def debug_nodes(self) -> list[Identifier]:
         """Get the debug nodes.
