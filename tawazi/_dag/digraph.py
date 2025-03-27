@@ -3,6 +3,7 @@
 from collections import defaultdict
 from collections.abc import Iterable, Sequence
 from copy import deepcopy
+from dataclasses import dataclass
 from itertools import chain
 from typing import Any, Optional
 
@@ -14,6 +15,364 @@ from tawazi.config import Config
 from tawazi.consts import Identifier, Tag
 from tawazi.errors import TawaziUsageError
 from tawazi.node import ExecNode, UsageExecNode
+
+
+@dataclass
+class GraphNode:
+    id: str
+    debug: bool = False
+    setup: bool = False
+    priority: int = 0
+    in_degree: int = 0
+    out_degree: int = 0
+    successors: Optional[list[str]] = None
+    predecessors: Optional[list[str]] = None
+    tag: Optional[Tag] = None
+
+    @classmethod
+    def from_xn(cls, xn: ExecNode):
+        if xn.tag:
+            if isinstance(xn.tag, Tag):
+                tag = [xn.tag]
+            else:
+                tag = [t for t in xn.tag]
+        else:
+            tag = None
+
+        predecessors = [xn.id for xn in xn.dependencies]
+
+        return cls(
+            id=xn.id,
+            debug=xn.debug,
+            setup=xn.setup,
+            priority=xn.priority,
+            predecessors=predecessors,
+            in_degree=len(predecessors),
+            tag=tag
+        )
+
+
+class DiGraph:
+    def __init__(self) -> None:
+        # Access to nodes data is very slow, using dict is faster
+        self.tag: dict[Identifier, Optional[list[Tag]]] = defaultdict(lambda: None)
+        self.debug: dict[Identifier, bool] = defaultdict(lambda: False)
+        self.setup: dict[Identifier, bool] = defaultdict(lambda: False)
+        self.compound_priority: dict[Identifier, int] = defaultdict(lambda: 0)
+        self._graph = {}
+        self.n_nodes = 0
+        self.nodes: dict[str, GraphNode] = {}
+
+    @property
+    def debug_nodes(self) -> list[Identifier]:
+        """Get the debug nodes.
+
+        Returns:
+            the debug nodes
+        """
+        return [id_ for id_, debug in self.debug.items() if debug]
+
+    @property
+    def setup_nodes(self) -> list[Identifier]:
+        """Get the setup nodes.
+
+        Returns:
+            the setup nodes
+        """
+        return [id_ for id_, setup in self.setup.items() if setup]
+
+    @property
+    def tags(self) -> set[str]:
+        """Get all the tags available for the graph.
+
+        Returns:
+            A set of tags
+        """
+        return set(chain(*(tags for tags in self.tag.values())))  # type: ignore[arg-type]
+
+    @property
+    def root_nodes(self) -> set[Identifier]:
+        """Safely gets the root nodes.
+
+        Returns:
+            List of root nodes
+        """
+        return {node.id for node in self.nodes.values() if node.in_degree == 0}
+
+
+    @property
+    def leaf_nodes(self) -> list[Identifier]:
+        """Safely get the leaf nodes.
+
+        Returns:
+            List of leaf nodes
+        """
+        return [node.id for node in self.nodes.values() if node.out_degree == 0]
+
+    def _add_xn(self, xn: ExecNode, dag_input_ids: list[str]) -> None:
+        # validate setup ExecNodes
+        if xn.setup and any(dep.id in dag_input_ids for dep in xn.dependencies):
+            raise TawaziUsageError(
+                f"The ExecNode {xn} takes as parameters one of the DAG's input parameter"
+            )
+
+        # Create node from ExecNode
+        node = GraphNode.from_xn(xn)
+        self.nodes[node.id] = node
+        self.setup[node.id] = node.setup
+        self.debug[node.id] = node.debug
+        self.compound_priority[node.id] = node.priority
+
+        # Ensure an entry exists for the node in _graph
+        if node.id not in self._graph:
+            self._graph[node.id] = {"in": set(), "out": set()}
+        # Add all predecessor edges: update the node's incoming edges
+        self._graph[node.id]["in"].update(node.predecessors or [])
+
+        # For each predecessor, add an outgoing edge to node
+        for pred in node.predecessors or []:
+            if pred not in self._graph:
+                self._graph[pred] = {"in": set(), "out": set()}
+            self._graph[pred]["out"].add(node.id)
+            # If the predecessor node exists in our nodes dict, update its out_degree
+            if pred in self.nodes:
+                pred_node = self.nodes[pred]
+                pred_node.out_degree = len(self._graph[pred]["out"])
+
+        # Finally, update this node's degrees based on current graph structure.
+        node.in_degree = len(self._graph[node.id]["in"])
+        node.out_degree = len(self._graph[node.id]["out"])
+
+
+    def _find_cycle(self):
+        """
+        Detects if there is a cycle in the directed graph.
+
+        Returns:
+            tuple: A tuple containing:
+                - bool: True if a cycle is found, False otherwise
+        """
+        # Track the state of nodes during DFS
+        not_visited = 0
+        visiting = 1
+        visited = 2
+
+        node_states = {node_id: not_visited for node_id in self._graph}
+        parent = {}
+
+        def dfs(node_id: str):
+            node_states[node_id] = visiting
+
+            for neighbor in self._graph[node_id]['out']:
+                # If neighbor is currently being visited, we found a cycle
+                if node_states[neighbor] == visiting:
+                    # Reconstruct the cycle path
+                    cycle_path = [neighbor, node_id]
+                    current = node_id
+                    while parent.get(current) and parent[current] != neighbor:
+                        current = parent[current]
+                        cycle_path.append(current)
+                    cycle_path.reverse()
+                    return True, cycle_path
+
+                # If neighbor is unvisited, explore it
+                if node_states[neighbor] == not_visited:
+                    parent[neighbor] = node_id
+                    cycle_found, cycle_path = dfs(neighbor)
+                    if cycle_found:
+                        return True, cycle_path
+
+            # mark node as completely visited
+            node_states[node_id] = visited
+            return False, []
+
+        # multi source dfs
+        for node_id in self._graph:
+            if node_states[node_id] == not_visited:
+                found, cycle = dfs(node_id)
+                if found:
+                    return True, cycle
+
+        return False, []
+
+    def _remove_node(self, node: str) -> None:
+        # prune out and in degrees and deps
+        for pred in self._graph[node].predecessors:
+            self._graph[pred].sucessors.remove(node)
+            self._graph[pred].out_degree -= 1
+
+        for succ in self._graph[node].successors:
+            self._graph[succ].predecessors.remove(node)
+            self._graph[succ].in_degree -= 1
+
+        del self._graph[node]
+
+
+    def _dft(self, node: str) -> list[str]:
+        """Simple depth first traversal.
+
+        Args:
+            node: the node from which to traverse
+
+        Returns:
+            the successors of the node.
+        """
+        def __dft(root, res):
+            res.append(root)
+            for succ in self._graph[node]["out"]:
+                __dft(succ, res)
+
+        result = []
+        __dft(node, result)
+        return result
+
+
+    def single_node_successors(self, node_id: Identifier) -> list[Identifier]:
+        """Get all the successors of a node with a depth first search.
+
+        Args:
+            node_id: the node acting as the root of the search
+
+        Returns:
+            list of the node's successors
+        """
+        return self._dft(node_id)
+
+    def multiple_nodes_successors(self, nodes_ids: Sequence[Identifier]) -> set[Identifier]:
+        """Get the successors of all nodes in the iterable.
+
+        Args:
+            nodes_ids: nodes of which we want successors
+
+        Returns:
+            a set of all the successors
+        """
+        return set(list(chain(*[self.single_node_successors(node_id) for node_id in nodes_ids])))
+
+
+    def assign_compound_priority(self) -> None:
+        """Assigns a compound priority to all nodes in the graph.
+
+        The compound priority is the sum of the priorities of all children recursively.
+        """
+        # 1. start from bottom up
+        leaf_ids = set(self.leaf_nodes)
+
+        # 2. assign the compound priority for all the remaining nodes in the graph:
+        # Priority assignment happens by epochs:
+        # 2.1. during every epoch, we assign the compound priority for the parents of the current leaf nodes
+
+        while leaf_ids:
+            next_leaf_ids = set()
+            for leaf_id in leaf_ids:
+                compound_priority = self.compound_priority[leaf_id]
+
+                # for parent nodes, this loop won't execute
+                for parent_id in self.nodes[leaf_id].predecessors:
+                    # increment the compound_priority of the parent node by the leaf priority
+                    self.compound_priority[parent_id] += compound_priority
+
+                    next_leaf_ids.add(parent_id)
+            leaf_ids = next_leaf_ids
+
+    def remove_root_node(self, root_node: Identifier) -> set[Identifier]:
+        """Removes a root node and returns all the new root nodes generated by this modification to the DAG."""
+        generated_root_nodes = {
+            new_root_node
+            for new_root_node in self._graph[root_node]["out"]
+            if self.nodes[new_root_node].in_degree == 1
+        }
+        self._remove_node(root_node)
+        return generated_root_nodes
+
+    def remove_any_root_node(self) -> Identifier:
+        """Removes any root node and returns the removed root node."""
+        for node in self.root_nodes:
+            self._remove_node(node)
+            return node # type: ignore[no-any-return]
+        raise ValueError("No root node to remove.")
+
+    @classmethod
+    def from_exec_nodes(
+        cls, input_nodes: list[UsageExecNode], exec_nodes: dict[Identifier, ExecNode]
+    ) -> Self:
+        """Build a DigraphEx from exec nodes.
+
+        Args:
+            input_nodes: nodes that are the inputs of the graph
+            exec_nodes: the graph nodes
+
+        Returns:
+            the DigraphEx object
+        """
+        graph = DiGraph()
+
+        input_ids = [uxn.id for uxn in input_nodes]
+        for xn in exec_nodes.values():
+            graph._add_xn(xn, input_ids)
+
+        # check for circular dependencies
+        has_cycle, cycle = graph._find_cycle()
+
+        if has_cycle:
+            raise TawaziUsageError(f"the DAG contains at least a circular dependency: {cycle}")
+
+        # compute the sum of priorities of all recursive children
+        graph.assign_compound_priority()
+
+        return graph
+
+
+    def get_tagged_nodes(self, tag: Tag) -> list[str]:
+        """Get nodes with a certain tag.
+
+        Args:
+            tag: the tag identifier
+
+        Returns:
+            a list of nodes
+        """
+        return [xn for xn, tags in self.tag.items() if tags is not None and tag in tags]
+
+
+    def get_single_reachable_leaves(self, root: Identifier) -> list[Identifier]:
+        """Get reachable leaf nodes from specified root.
+
+        Args:
+            root: the start node to consider
+
+        Returns:
+            the leaves reachable from that node.
+        """
+        reachable_leaves = self.single_node_successors(root)
+        leaves = []
+
+        for leaf in self.leaf_nodes:
+            if leaf in reachable_leaves:
+                leaves.append(leaf)
+
+        return leaves
+
+    def get_multiple_reachable_leaves(self, roots: list[Identifier]) -> list[Identifier]:
+        """Get all reachable leaf nodes from specified roots.
+
+        Args:
+            roots: the start nodes to consider
+
+        Returns:
+            the leaves reachable from all roots.
+        """
+        all_reachable = []
+
+        for root in roots:
+            reachable_leaves = self.get_single_reachable_leaves(root)
+
+            for leaf in reachable_leaves:
+                if leaf not in all_reachable:
+                    all_reachable.append(leaf)
+
+        return all_reachable
+
 
 
 class DiGraphEx(nx.DiGraph):
