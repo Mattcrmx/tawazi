@@ -48,7 +48,7 @@ class GraphNode:
             priority=xn.priority,
             predecessors=predecessors,
             in_degree=len(predecessors),
-            tag=tag
+            tag=tag,
         )
 
 
@@ -99,7 +99,6 @@ class DiGraph:
         """
         return {node.id for node in self.nodes.values() if node.in_degree == 0}
 
-
     @property
     def leaf_nodes(self) -> list[Identifier]:
         """Safely get the leaf nodes.
@@ -143,10 +142,8 @@ class DiGraph:
         node.in_degree = len(self._graph[node.id]["in"])
         node.out_degree = len(self._graph[node.id]["out"])
 
-
     def _find_cycle(self):
-        """
-        Detects if there is a cycle in the directed graph.
+        """Detects if there is a cycle in the directed graph.
 
         Returns:
             tuple: A tuple containing:
@@ -163,7 +160,7 @@ class DiGraph:
         def dfs(node_id: str):
             node_states[node_id] = visiting
 
-            for neighbor in self._graph[node_id]['out']:
+            for neighbor in self._graph[node_id]["out"]:
                 # If neighbor is currently being visited, we found a cycle
                 if node_states[neighbor] == visiting:
                     # Reconstruct the cycle path
@@ -207,7 +204,6 @@ class DiGraph:
 
         del self._graph[node]
 
-
     def _dft(self, node: str) -> list[str]:
         """Simple depth first traversal.
 
@@ -217,6 +213,7 @@ class DiGraph:
         Returns:
             the successors of the node.
         """
+
         def __dft(root, res):
             res.append(root)
             for succ in self._graph[node]["out"]:
@@ -225,7 +222,6 @@ class DiGraph:
         result = []
         __dft(node, result)
         return result
-
 
     def single_node_successors(self, node_id: Identifier) -> list[Identifier]:
         """Get all the successors of a node with a depth first search.
@@ -248,7 +244,6 @@ class DiGraph:
             a set of all the successors
         """
         return set(list(chain(*[self.single_node_successors(node_id) for node_id in nodes_ids])))
-
 
     def assign_compound_priority(self) -> None:
         """Assigns a compound priority to all nodes in the graph.
@@ -289,7 +284,7 @@ class DiGraph:
         """Removes any root node and returns the removed root node."""
         for node in self.root_nodes:
             self._remove_node(node)
-            return node # type: ignore[no-any-return]
+            return node  # type: ignore[no-any-return]
         raise ValueError("No root node to remove.")
 
     @classmethod
@@ -322,7 +317,6 @@ class DiGraph:
 
         return graph
 
-
     def get_tagged_nodes(self, tag: Tag) -> list[str]:
         """Get nodes with a certain tag.
 
@@ -333,7 +327,6 @@ class DiGraph:
             a list of nodes
         """
         return [xn for xn, tags in self.tag.items() if tags is not None and tag in tags]
-
 
     def get_single_reachable_leaves(self, root: Identifier) -> list[Identifier]:
         """Get reachable leaf nodes from specified root.
@@ -372,7 +365,6 @@ class DiGraph:
                     all_reachable.append(leaf)
 
         return all_reachable
-
 
 
 class DiGraphEx(nx.DiGraph):
